@@ -8835,6 +8835,13 @@ const CODES = window.KS_DEAL_CODES || Object.create(null);
 
   function storeBalances(result) {
     const data = dataOf(result);
+    const dailyPnl = Number(data.dailyPnl);
+    if (data.dailyPnl != null && Number.isFinite(dailyPnl)) {
+      window.__veloxDailyPnl = dailyPnl;
+      window.dispatchEvent(new CustomEvent('ks-daily-pnl-update', {
+        detail: { dailyPnl: dailyPnl, date: safeText(data.dailyPnlDate || '') }
+      }));
+    }
     const source = data.balances || data.walletBalances || data.wallet ||
       (data.balance && typeof data.balance === 'object' ? data.balance : data);
     const user = currentUser();
@@ -9852,6 +9859,79 @@ const CODES = window.KS_DEAL_CODES || Object.create(null);
     };
     referralDataWithInviter._inviterFallback = true;
     window.ksAuthReferralData = referralDataWithInviter;
+  }
+})();
+</script>
+<script id="ks-live-daily-pnl">
+(function () {
+  'use strict';
+  var todayLabels = {
+    ar: 'اليوم', en: 'today', tr: 'bugün', fr: "aujourd'hui",
+    es: 'hoy', nl: 'vandaag', de: 'heute', ru: 'сегодня',
+    zh: '今日', ko: '오늘', hi: 'आज'
+  };
+  var renderScheduled = false;
+
+  function renderDailyPnl() {
+    var heading = document.querySelector('.assets-banner .assets-heading > span');
+    if (heading) {
+      heading.setAttribute('data-ks-no-translate', '');
+      heading.setAttribute('translate', 'no');
+      heading.setAttribute('lang', 'en');
+      if (heading.textContent !== 'My Assets') heading.textContent = 'My Assets';
+    }
+
+    var homeValue = document.querySelector('.assets-banner .earning');
+    var walletValue = document.querySelector('.wallet-daily span[dir="ltr"]');
+    var pnl = window.__veloxDailyPnl;
+    var hasPnl = pnl != null && Number.isFinite(Number(pnl));
+    var amount = hasPnl ? Number(pnl) : 0;
+    var sign = amount < 0 ? '-' : '+';
+    var number = Math.abs(amount).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+    var homeBalance = document.querySelector('.assets-banner .balance');
+    var walletBalance = document.querySelector('.wallet-total');
+    var homeHidden = !!(homeBalance && homeBalance.textContent.indexOf('•') >= 0);
+    var walletHidden = !!(walletBalance && walletBalance.textContent.indexOf('•') >= 0);
+    var language = String(window.ksInterfaceLanguage || 'ar').toLowerCase();
+    var today = todayLabels[language] || todayLabels[language.split('-')[0]] || 'today';
+
+    if (homeValue) {
+      var homeText = homeHidden ? '••••••' :
+        (hasPnl ? sign + '$' + number + ' · ' + today : '—');
+      if (homeValue.textContent !== homeText) homeValue.textContent = homeText;
+      homeValue.classList.toggle('text-negative', hasPnl && amount < 0);
+      homeValue.classList.toggle('text-positive', hasPnl && amount >= 0);
+    }
+
+    if (walletValue) {
+      var walletText = walletHidden ? '••••' :
+        (hasPnl ? 'USD ' + sign + number : 'USD —');
+      if (walletValue.textContent !== walletText) walletValue.textContent = walletText;
+    }
+  }
+
+  function scheduleRender() {
+    if (renderScheduled) return;
+    renderScheduled = true;
+    var render = function () {
+      renderScheduled = false;
+      renderDailyPnl();
+    };
+    if (window.requestAnimationFrame) window.requestAnimationFrame(render);
+    else window.setTimeout(render, 16);
+  }
+
+  window.addEventListener('ks-daily-pnl-update', scheduleRender);
+  window.addEventListener('ks-language-change', scheduleRender);
+  window.addEventListener('ks-balance-change', scheduleRender);
+  scheduleRender();
+
+  if (window.MutationObserver && document.documentElement) {
+    var observer = new MutationObserver(scheduleRender);
+    observer.observe(document.documentElement, { childList: true, subtree: true });
   }
 })();
 </script>
