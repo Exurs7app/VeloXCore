@@ -8874,15 +8874,20 @@ const CODES = window.KS_DEAL_CODES || Object.create(null);
   function normalizeTeam(result) {
     const data = dataOf(result);
     const members = normalizeRows(data, ['members', 'team', 'items', 'users']);
+    const totals = data.totals && typeof data.totals === 'object' ? data.totals : {};
+    const earnings = data.teamEarnings != null ? data.teamEarnings :
+      (data.earnings != null ? data.earnings : totals.earnings);
     return {
       code: safeText(data.referralCode || data.code || currentUser().referralCode),
-      teamEarnings: Number(data.teamEarnings || data.earnings || 0),
+      teamEarnings: Number(earnings) || 0,
       inviter: data.inviter || null,
       members: members.map(function (member) {
         return {
           name: safeText(member.name || member.username),
           uid: safeText(member.uid || member.accountUid).replace(/^KS-/, ''),
-          referralProfit: Number(member.referralProfit || member.profit || member.earnings || 0)
+          referralProfit: Number(member.referralProfit != null ? member.referralProfit :
+            (member.profit != null ? member.profit :
+              (member.earnings != null ? member.earnings : member.reward))) || 0
         };
       })
     };
