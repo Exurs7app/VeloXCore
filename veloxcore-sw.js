@@ -1,7 +1,7 @@
 /* VeloXCore service worker: online-first. Only the app shell is cached for an
    offline fallback; account and wallet data requests are never cached. */
-var CACHE = 'veloxcore-shell-v3';
-var SHELL = ['./', './index.html', './veloxcore-manifest.webmanifest?v=3',
+var CACHE = 'veloxcore-shell-v6';
+var SHELL = ['./', './index.html', './veloxcore-manifest.webmanifest?v=6',
   './veloxcore-icon-180.png', './veloxcore-icon-192.png', './veloxcore-icon-512.png'];
 
 self.addEventListener('install', function (event) {
