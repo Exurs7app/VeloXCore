@@ -170,7 +170,7 @@ html[lang="ar"] .feature-card-copy { unicode-bidi:plaintext; }
   screen.appendChild(dots);
   document.body.appendChild(screen);
   var ready=!!root.firstElementChild;
-  var elapsed=false;
+  var elapsed=document.readyState==="complete";
   var dismissed=false;
   function dismiss(force){
     if(dismissed||(!force&&(!ready||!elapsed)))return;
@@ -181,8 +181,8 @@ html[lang="ar"] .feature-card-copy { unicode-bidi:plaintext; }
   }
   var observer=new MutationObserver(function(){ready=!!root.firstElementChild;dismiss(false);});
   observer.observe(root,{childList:true,subtree:true});
-  window.setTimeout(function(){elapsed=true;dismiss(false);},0);
-  window.setTimeout(function(){dismiss(true);},6000);
+  if(elapsed){dismiss(false);}else{window.addEventListener("load",function(){elapsed=true;dismiss(false);},{once:true});}
+  window.setTimeout(function(){dismiss(true);},30000);
 })();
 </script><style>
 .asset-table-head{display:none!important}
