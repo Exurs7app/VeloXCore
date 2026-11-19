@@ -2900,5 +2900,110 @@ function setup(){document.querySelectorAll('.kw-overlay:not(.kw-history-mode) .k
 new MutationObserver(setup).observe(document.documentElement,{childList:true,subtree:true});setup();
 })();
 </script>
+<script id="kyc-drive-upload">
+/* KYC: إرفاق صور الهوية بطلب submitVerification فقط. أي طلب آخر يمر كما هو. */
+(function () {
+  'use strict';
+  var MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 8 * 1024 * 1024;
+  var ALLOWED = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'image/heic': 1 };
+  var originalFetch = window.fetch;
+  if (typeof originalFetch !== 'function') return;
+
+  function errorResponse(message) {
+    return new Response(JSON.stringify({ ok: false, status: 'error', error: 'invalid_files', message: message }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } });
+  }
+  function mimeOf(file) {
+    var t = String(file.type || '').toLowerCase();
+    if (t === 'image/jpg') t = 'image/jpeg';
+    if (t) return t;
+    var n = String(file.name || '');
+    return /\.heic$/i.test(n) ? 'image/heic' : /\.png$/i.test(n) ? 'image/png' : /\.webp$/i.test(n) ? 'image/webp' : /\.jpe?g$/i.test(n) ? 'image/jpeg' : '';
+  }
+  // تصغير الصور الكبيرة (غير HEIC) إلى JPEG، كما تفعل الصفحة أصلًا
+  function shrink(file) {
+    var mime = mimeOf(file);
+    if (file.size <= 1433600 || mime === 'image/heic' || !window.createImageBitmap) return Promise.resolve(file);
+    return createImageBitmap(file).then(function (bmp) {
+      var scale = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+      var c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(bmp.width * scale));
+      c.height = Math.max(1, Math.round(bmp.height * scale));
+      var ctx = c.getContext('2d');
+      if (!ctx) return file;
+      ctx.drawImage(bmp, 0, 0, c.width, c.height);
+      if (bmp.close) bmp.close();
+      return new Promise(function (res) {
+        c.toBlob(function (blob) {
+          if (!blob || blob.size >= file.size) return res(file);
+          res(new File([blob], (String(file.name || 'document').replace(/\.[^.]+$/, '') || 'document') + '.jpg', { type: 'image/jpeg' }));
+        }, 'image/jpeg', 0.84);
+      });
+    }).catch(function () { return file; });
+  }
+  function toPayload(file, key) {
+    return shrink(file).then(function (f) {
+      return new Promise(function (res, rej) {
+        var r = new FileReader();
+        r.onload = function () {
+          var s = String(r.result || ''), i = s.indexOf(',');
+          if (i < 0) return rej(new Error('تعذر قراءة صورة الوثيقة'));
+          res({ key: key, name: String(f.name || key), mimeType: mimeOf(f), base64: s.slice(i + 1), size: f.size });
+        };
+        r.onerror = function () { rej(new Error('تعذر قراءة صورة الوثيقة')); };
+        r.readAsDataURL(f);
+      });
+    });
+  }
+  function isPassport(docType) {
+    var v = String(docType || '').toLowerCase();
+    return v.indexOf('passport') >= 0 || v.indexOf('جواز') >= 0;
+  }
+
+  window.fetch = function (input, init) {
+    var body = init && typeof init.body === 'string' ? init.body : null;
+    if (!body || body.indexOf('submitVerification') < 0) return originalFetch.apply(this, arguments);
+    var data;
+    try { data = JSON.parse(body); } catch (e) { return originalFetch.apply(this, arguments); }
+    if (!data || data.action !== 'submitVerification' || Array.isArray(data.files)) return originalFetch.apply(this, arguments);
+
+    var self = this, store = window.__veloxKycFiles || {};
+    var keys = isPassport(data.docType) ? ['front'] : ['front', 'back'];
+    for (var k = 0; k < keys.length; k++) {
+      var f = store[keys[k]];
+      if (!f) return Promise.resolve(errorResponse('أرفق صور الوثيقة المطلوبة قبل المتابعة'));
+      if (!ALLOWED[mimeOf(f)]) return Promise.resolve(errorResponse('اختر صورة بصيغة JPG أو PNG أو WEBP أو HEIC'));
+    }
+    return Promise.all(keys.map(function (key) { return toPayload(store[key], key); })).then(function (list) {
+      var total = 0;
+      for (var i = 0; i < list.length; i++) {
+        if (list[i].size > MAX_FILE) return errorResponse('الحد الأقصى لكل صورة هو 4 MB');
+        total += list[i].size;
+        delete list[i].size;
+      }
+      if (total > MAX_TOTAL) return errorResponse('إجمالي صور الوثيقة يتجاوز 8 MB');
+      data.files = list;
+      var nextInit = Object.assign({}, init, { body: JSON.stringify(data) });
+      return originalFetch.call(self, input, nextInit);
+    }, function () { return errorResponse('تعذر قراءة صورة الوثيقة'); });
+  };
+
+  // تصحيح نصوص الخصوصية القديمة داخل نافذة التحقق لأنها لم تعد صحيحة
+  var TEXT = [
+    ['مطلوب — تحفظ الصورة على جهازك ولا تُرسل', 'مطلوب — تُرسل الصورة بشكل خاص للمراجعة'],
+    ['الصور تبقى على جهازك ولا تُرسل؛ تُرسل البيانات المكتوبة فقط.', 'تُرسل الصور مع البيانات للمراجعة وتُحفظ بشكل خاص.'],
+    ['ستُرسل البيانات النصية فقط، دون صور.', 'ستُرسل البيانات مع صور الوثيقة للمراجعة.']
+  ];
+  function fixText(root) {
+    if (!root || !root.querySelectorAll) return;
+    var w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), n;
+    while ((n = w.nextNode())) {
+      for (var i = 0; i < TEXT.length; i++) if (n.nodeValue.indexOf(TEXT[i][0]) >= 0) n.nodeValue = n.nodeValue.split(TEXT[i][0]).join(TEXT[i][1]);
+    }
+  }
+  new MutationObserver(function () { var m = document.getElementById('ksp-m'); if (m) fixText(m); })
+    .observe(document.documentElement, { childList: true, subtree: true });
+})();
+</script>
 </body>
 </html>
