@@ -2901,13 +2901,15 @@ new MutationObserver(setup).observe(document.documentElement,{childList:true,sub
 })();
 </script>
 <script id="kyc-drive-upload">
-/* KYC: إرفاق صور الهوية بطلب submitVerification فقط. أي طلب آخر يمر كما هو. */
+/* KYC: إرفاق صور الهوية بطلب submitVerification فقط. أي طلب آخر يمر كما هو.
+   الصور تُصغّر وتُحوّل إلى Base64 في الخلفية فور اختيارها، وتُرسل جاهزة عند الضغط على الإرسال. */
 (function () {
   'use strict';
-  var MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 8 * 1024 * 1024;
+  var MAX_FILE = 4 * 1024 * 1024, MAX_TOTAL = 8 * 1024 * 1024, MAX_DIM = 1800, QUALITY = 0.92;
   var ALLOWED = { 'image/jpeg': 1, 'image/png': 1, 'image/webp': 1, 'image/heic': 1 };
   var originalFetch = window.fetch;
   if (typeof originalFetch !== 'function') return;
+  var cache = typeof WeakMap === 'function' ? new WeakMap() : null;
 
   function errorResponse(message) {
     return new Response(JSON.stringify({ ok: false, status: 'error', error: 'invalid_files', message: message }),
@@ -2920,45 +2922,102 @@ new MutationObserver(setup).observe(document.documentElement,{childList:true,sub
     var n = String(file.name || '');
     return /\.heic$/i.test(n) ? 'image/heic' : /\.png$/i.test(n) ? 'image/png' : /\.webp$/i.test(n) ? 'image/webp' : /\.jpe?g$/i.test(n) ? 'image/jpeg' : '';
   }
-  // تصغير الصور الكبيرة (غير HEIC) إلى JPEG، كما تفعل الصفحة أصلًا
+  function isFile(f) { return !!f && typeof Blob !== 'undefined' && f instanceof Blob; }
+  function bitmap(file) {
+    try { return createImageBitmap(file, { imageOrientation: 'from-image' }).catch(function () { return createImageBitmap(file); }); }
+    catch (e) { return createImageBitmap(file); }
+  }
+  // تصغير إلى أقصى بُعد 1800px بجودة JPEG عالية مع الحفاظ على نسبة الأبعاد ودون قص (HEIC يبقى كما هو)
   function shrink(file) {
     var mime = mimeOf(file);
-    if (file.size <= 1433600 || mime === 'image/heic' || !window.createImageBitmap) return Promise.resolve(file);
-    return createImageBitmap(file).then(function (bmp) {
-      var scale = Math.min(1, 1800 / Math.max(bmp.width, bmp.height));
+    if (mime === 'image/heic' || !ALLOWED[mime] || !window.createImageBitmap) return Promise.resolve(file);
+    return bitmap(file).then(function (bmp) {
+      var big = Math.max(bmp.width, bmp.height);
+      if (big <= MAX_DIM && file.size <= 1433600) { if (bmp.close) bmp.close(); return file; }
+      var scale = Math.min(1, MAX_DIM / big);
       var c = document.createElement('canvas');
       c.width = Math.max(1, Math.round(bmp.width * scale));
       c.height = Math.max(1, Math.round(bmp.height * scale));
       var ctx = c.getContext('2d');
-      if (!ctx) return file;
+      if (!ctx) { if (bmp.close) bmp.close(); return file; }
+      ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, c.width, c.height);
+      ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
       ctx.drawImage(bmp, 0, 0, c.width, c.height);
       if (bmp.close) bmp.close();
       return new Promise(function (res) {
         c.toBlob(function (blob) {
-          if (!blob || blob.size >= file.size) return res(file);
+          if (!blob || (blob.size >= file.size && file.size <= MAX_FILE)) return res(file);
           res(new File([blob], (String(file.name || 'document').replace(/\.[^.]+$/, '') || 'document') + '.jpg', { type: 'image/jpeg' }));
-        }, 'image/jpeg', 0.84);
+        }, 'image/jpeg', QUALITY);
       });
     }).catch(function () { return file; });
   }
-  function toPayload(file, key) {
+  function encode(file) {
     return shrink(file).then(function (f) {
       return new Promise(function (res, rej) {
         var r = new FileReader();
         r.onload = function () {
           var s = String(r.result || ''), i = s.indexOf(',');
           if (i < 0) return rej(new Error('تعذر قراءة صورة الوثيقة'));
-          res({ key: key, name: String(f.name || key), mimeType: mimeOf(f), base64: s.slice(i + 1), size: f.size });
+          res({ name: String(f.name || ''), mimeType: mimeOf(f), base64: s.slice(i + 1), size: f.size });
         };
         r.onerror = function () { rej(new Error('تعذر قراءة صورة الوثيقة')); };
         r.readAsDataURL(f);
       });
     });
   }
+  // معالجة مسبقة: مرة واحدة لكل ملف، والنتيجة محفوظة في الذاكرة
+  function prepare(file) {
+    if (!isFile(file) || !ALLOWED[mimeOf(file)]) return null;
+    if (!cache) return encode(file);
+    var p = cache.get(file);
+    if (!p) {
+      p = encode(file);
+      p.catch(function () { if (cache.get(file) === p) cache['delete'](file); });
+      cache.set(file, p);
+    }
+    return p;
+  }
+  function toPayload(file, key) {
+    return (prepare(file) || encode(file)).then(function (d) {
+      return { key: key, name: d.name || key, mimeType: d.mimeType, base64: d.base64, size: d.size };
+    });
+  }
   function isPassport(docType) {
     var v = String(docType || '').toLowerCase();
     return v.indexOf('passport') >= 0 || v.indexOf('جواز') >= 0;
   }
+
+  // 1) فور اختيار/التقاط صورة من أي حقل ملفات
+  document.addEventListener('change', function (e) {
+    var t = e.target;
+    if (!t || t.tagName !== 'INPUT' || String(t.type).toLowerCase() !== 'file' || !t.files) return;
+    for (var i = 0; i < t.files.length; i++) prepare(t.files[i]);
+  }, true);
+
+  // 2) فور إسناد الصور إلى مخزن التحقق window.__veloxKycFiles
+  function watchStore(obj) {
+    if (!obj || typeof obj !== 'object') return obj;
+    for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) prepare(obj[k]);
+    if (typeof Proxy !== 'function' || obj.__kycWatched) return obj;
+    try {
+      return new Proxy(obj, {
+        set: function (target, key, value) { target[key] = value; prepare(value); return true; },
+        get: function (target, key) { return key === '__kycWatched' ? true : target[key]; }
+      });
+    } catch (e) { return obj; }
+  }
+  try {
+    var current = watchStore(window.__veloxKycFiles);
+    var desc = Object.getOwnPropertyDescriptor(window, '__veloxKycFiles');
+    if (!desc || desc.configurable) {
+      Object.defineProperty(window, '__veloxKycFiles', {
+        configurable: true, enumerable: true,
+        get: function () { return current; },
+        set: function (v) { current = watchStore(v); }
+      });
+    }
+  } catch (e) {}
 
   window.fetch = function (input, init) {
     var body = init && typeof init.body === 'string' ? init.body : null;
