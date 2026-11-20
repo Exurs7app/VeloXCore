@@ -1,4 +1,200 @@
 <!doctype html><html lang="en" class="dark" translate="no"><head><meta name="google" content="notranslate"/>
+<script id="ks-device-attempt-guard-v3">
+(function () {
+  if (window.__ksAttemptGuardV3) return; window.__ksAttemptGuardV3 = 1;
+  var KEY = 'deviceId', CNT_KEY = 'ksRegAttempts', BLOCK_KEY = 'deviceBlockedUntil';
+  var MAX = 5, BLOCK_MS = 864e5;
+  var BLOCK_MSG = 'تم تجاوز الحد الأقصى للمحاولات (5 محاولات). تم حظر جهازك مؤقتاً لمدة 24 ساعة.';
+  var WARN_MSG = 'تنبيه: متبقي لك محاولة واحدة أخيرة قبل حظر الجهاز مؤقتاً لمدة 24 ساعة.';
+  var WARN_EN = 'Warning: You have 1 last attempt remaining before your device is temporarily blocked for 24 hours.';
+  var GUARDED = { sendregistercode: 1, completeregistration: 1, register: 1 };
+  var LS = window.localStorage, deviceId = '';
+  try {
+    deviceId = LS.getItem(KEY);
+    if (!deviceId) {
+      deviceId = (window.crypto && crypto.randomUUID) ? crypto.randomUUID()
+        : 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 12);
+      LS.setItem(KEY, deviceId);
+    }
+  } catch (e) {}
+  function num(k) { try { return Number(LS.getItem(k)) || 0; } catch (e) { return 0; } }
+  function setv(k, v) { try { LS.setItem(k, String(v)); } catch (e) {} }
+  function blocked() {
+    var u = num(BLOCK_KEY);
+    if (u && u <= Date.now()) { try { LS.removeItem(BLOCK_KEY); LS.removeItem(CNT_KEY); } catch (e) {} return false; }
+    return u > Date.now();
+  }
+  function block(until) { setv(BLOCK_KEY, until || (Date.now() + BLOCK_MS)); }
+  function blockObj() { return { ok: false, status: 'error', error: 'device_blocked', blocked: true, attemptsLeft: 0, blockedUntil: num(BLOCK_KEY), message: BLOCK_MSG }; }
+
+  // إشعار علوي مستقل بنفس تنسيق إشعارات الحماية الحالية.
+  function isEnglish() {
+    try {
+      var h = document.documentElement, b = document.body, o = document.getElementById('ks-auth-overlay');
+      var lang = (h.lang || '').toLowerCase();
+      if (lang) return lang.indexOf('ar') !== 0;
+      var saved = ''; try { saved = (LS.getItem('ks_interface_language_v1') || '').replace(/"/g, '').toLowerCase(); } catch (e) {}
+      if (saved) return saved.indexOf('ar') !== 0;
+      return (o && o.getAttribute('dir') === 'ltr') || h.dir === 'ltr' || (b && b.dir === 'ltr');
+    } catch (e) { return false; }
+  }
+  function syncWarningToasts() {
+    try {
+      var en = isEnglish(), nodes = document.querySelectorAll('[data-ks-attempt-warning="1"]');
+      for (var i = 0; i < nodes.length; i++) {
+        nodes[i].dir = en ? 'ltr' : 'rtl';
+        nodes[i].textContent = en ? WARN_EN : WARN_MSG;
+      }
+    } catch (e) {}
+  }
+  function toast(msg, danger) {
+    try {
+      var d = document.createElement('div'), warning = msg === WARN_MSG, en = isEnglish();
+      d.setAttribute('role', 'alert');
+      d.className = 'ks-guard-toast';
+      if (warning) d.setAttribute('data-ks-attempt-warning', '1');
+      d.dir = en ? 'ltr' : 'rtl';
+      d.textContent = warning && en ? WARN_EN : msg;
+      d.style.cssText = 'position:fixed;left:50%;top:16px;transform:translateX(-50%);z-index:2147483647;max-width:92vw;padding:12px 16px;border-radius:14px;font:600 13px/1.6 system-ui,sans-serif;color:#fff;box-shadow:0 10px 30px rgba(0,0,0,.45);border:1px solid ' + (danger ? 'rgba(248,113,113,.6);background:rgba(127,29,29,.95)' : 'rgba(251,191,36,.6);background:rgba(120,53,15,.95)');
+      (document.body || document.documentElement).appendChild(d);
+      setTimeout(function () { d.remove(); }, 6000);
+    } catch (e) {}
+  }
+  new MutationObserver(syncWarningToasts).observe(document.documentElement, { attributes: true, attributeFilter: ['lang', 'dir'] });
+  document.addEventListener('click', function () { setTimeout(syncWarningToasts, 0); setTimeout(syncWarningToasts, 300); }, true);
+  window.addEventListener('storage', syncWarningToasts);
+
+  // ---- حقن deviceId في أي صيغة body ----
+  function inject(body) {
+    var action = '', out = body;
+    try {
+      if (typeof body === 'string') {
+        var obj = null; try { obj = JSON.parse(body); } catch (e) {}
+        if (obj && typeof obj === 'object') {
+          action = String(obj.action || '').toLowerCase();
+          if (GUARDED[action]) { obj.deviceId = deviceId; out = JSON.stringify(obj); }
+        } else if (body.indexOf('=') > -1) {
+          var p = new URLSearchParams(body); action = String(p.get('action') || '').toLowerCase();
+          if (GUARDED[action]) { p.set('deviceId', deviceId); out = p.toString(); }
+        }
+      } else if (body && (body instanceof URLSearchParams || (window.FormData && body instanceof FormData))) {
+        action = String(body.get('action') || '').toLowerCase();
+        if (GUARDED[action]) body.set('deviceId', deviceId);
+      }
+    } catch (e) {}
+    return { action: action, body: out };
+  }
+  function injectUrl(url) {
+    try {
+      var u = new URL(String(url), location.href), a = String(u.searchParams.get('action') || '').toLowerCase();
+      if (GUARDED[a]) { u.searchParams.set('deviceId', deviceId); return { action: a, url: u.toString() }; }
+    } catch (e) {}
+    return { action: '', url: url };
+  }
+
+  // قبل الإرسال: يرجع كائن رد محلي إن وجب الإيقاف، وإلا null
+  function before(action) {
+    if (blocked()) return blockObj();
+    if (action === 'sendregistercode') setv(CNT_KEY, num(CNT_KEY) + 1);
+    return null;
+  }
+  // بعد الرد: data = null إذا كان الرد غير مقروء (no-cors)
+  function after(action, data) {
+    var shown = false;
+    if (data && data.ok !== false && action === 'completeregistration') { try { LS.removeItem(CNT_KEY); } catch (e) {} return data; }
+    if (data && typeof data.attemptsLeft === 'number' && action === 'sendregistercode') {
+      setv(CNT_KEY, Math.max(num(CNT_KEY), MAX - data.attemptsLeft)); // الخادم هو المرجع
+    }
+    var n = num(CNT_KEY);
+    if ((data && data.blocked) || (action === 'sendregistercode' && n >= MAX)) {
+      block(data && data.blockedUntil);
+      data = blockObj();
+    } else if (action === 'sendregistercode' && n === MAX - 1) {
+      // لا نعدّل data.message: رسالة السيرفر تبقى مستقلة أسفل الحقل.
+      toast(WARN_MSG, false); shown = true;
+    }
+    if (!data) { if (blocked()) toast(BLOCK_MSG, true); }
+    return data;
+  }
+  function jsonRes(o) { return new Response(JSON.stringify(o), { status: 200, headers: { 'Content-Type': 'application/json' } }); }
+
+  // ---- fetch ----
+  var nativeFetch = window.fetch;
+  window.fetch = function (input, init) {
+    var self = this, args = arguments;
+    var isReq = (typeof Request !== 'undefined') && input instanceof Request;
+    var url = isReq ? input.url : String(input && input.url || input);
+    if (!/script\.google(usercontent)?\.com/.test(url)) return nativeFetch.apply(self, args);
+    var prep = isReq && !(init && init.body) && input.method !== 'GET'
+      ? input.clone().text().then(function (t) { return t; }) : Promise.resolve(init && init.body);
+    return prep.then(function (rawBody) {
+      var b = inject(rawBody), uq = injectUrl(url), action = b.action || uq.action;
+      if (!GUARDED[action]) return nativeFetch.apply(self, args);
+      var stop = before(action);
+      if (stop) { toast(stop.message, true); return jsonRes(stop); }
+      var newInit = Object.assign({}, init || {});
+      if (isReq) { newInit.method = newInit.method || input.method; newInit.headers = newInit.headers || input.headers; }
+      if (rawBody !== undefined && rawBody !== null) newInit.body = b.body;
+      return nativeFetch.call(self, uq.url, newInit).then(function (res) {
+        if (res.type === 'opaque') { after(action, null); if (blocked()) return jsonRes(blockObj()); return res; }
+        return res.clone().text().then(function (txt) {
+          var data; try { data = JSON.parse(txt); } catch (e) { after(action, null); return res; }
+          var before2 = JSON.stringify(data), out = after(action, data);
+          return JSON.stringify(out) === before2 ? res : jsonRes(out);
+        });
+      });
+    });
+  };
+
+  // ---- XMLHttpRequest ----
+  var XP = XMLHttpRequest.prototype, oOpen = XP.open, oSend = XP.send;
+  XP.open = function (method, url) {
+    var u = injectUrl(url); this.__ksA = u.action; this.__ksU = /script\.google(usercontent)?\.com/.test(String(url));
+    var a = Array.prototype.slice.call(arguments); a[1] = u.url; return oOpen.apply(this, a);
+  };
+  XP.send = function (body) {
+    if (!this.__ksU) return oSend.apply(this, arguments);
+    var b = inject(body), action = b.action || this.__ksA, xhr = this;
+    if (!GUARDED[action]) return oSend.apply(this, arguments);
+    var stop = before(action);
+    if (stop) {
+      var txt = JSON.stringify(stop);
+      ['readyState', 'status', 'responseText', 'response'].forEach(function (k, i) {
+        Object.defineProperty(xhr, k, { configurable: true, value: [4, 200, txt, txt][i] });
+      });
+      toast(stop.message, true);
+      setTimeout(function () {
+        xhr.onreadystatechange && xhr.onreadystatechange(new Event('readystatechange'));
+        xhr.dispatchEvent(new Event('readystatechange')); xhr.onload && xhr.onload(new Event('load'));
+        xhr.dispatchEvent(new Event('load')); xhr.dispatchEvent(new Event('loadend'));
+      }, 0);
+      return;
+    }
+    xhr.addEventListener('readystatechange', function () {
+      if (xhr.readyState !== 4 || xhr.__ksDone) return; xhr.__ksDone = 1;
+      var data = null; try { data = JSON.parse(xhr.responseText); } catch (e) {}
+      var out = after(action, data);
+      if (data && out && JSON.stringify(out) !== xhr.responseText) {
+        var t = JSON.stringify(out);
+        Object.defineProperty(xhr, 'responseText', { configurable: true, value: t });
+        Object.defineProperty(xhr, 'response', { configurable: true, value: xhr.responseType === 'json' ? out : t });
+      }
+    });
+    return oSend.call(this, b.body);
+  };
+
+  // ---- form submit (احتياطي) ----
+  document.addEventListener('submit', function (ev) {
+    var f = ev.target; if (!f || !f.action || !/script\.google/.test(f.action)) return;
+    var a = f.querySelector('[name=action]'); var action = String(a && a.value || '').toLowerCase();
+    if (!GUARDED[action]) return;
+    var stop = before(action); if (stop) { ev.preventDefault(); toast(stop.message, true); return; }
+    var i = f.querySelector('[name=deviceId]') || f.appendChild(Object.assign(document.createElement('input'), { type: 'hidden', name: 'deviceId' }));
+    i.value = deviceId;
+  }, true);
+})();
+</script>
+
 <link rel="manifest" href="./veloxcore-manifest.webmanifest?v=6"/><link rel="apple-touch-icon" href="./veloxcore-icon-180.png"/><link rel="icon" type="image/png" sizes="192x192" href="./veloxcore-icon-192.png"/><meta name="application-name" content="VeloXCore"/><meta name="apple-mobile-web-app-title" content="VeloXCore"/>
         <script id="wallet-screen-scroll-lock">
 (function(){function blocked(t){var w=document.querySelector('.wallet-screen');if(!w||!t||!t.nodeType)return false;return w.contains(t)||(t.contains&&t.contains(w))||(function(){var h=t.closest&&t.closest('section,div');return h&&h.contains(w);})();}
@@ -1236,7 +1432,7 @@ body.ks-auth-locked #root{filter:blur(4px) brightness(.38);pointer-events:none;u
 .ka-toast-text b{color:#cdbdff;font-weight:800;letter-spacing:.14em;direction:ltr;unicode-bidi:isolate}
 @media (prefers-reduced-motion:reduce){.ka-toast,.ka-toast-icon i{transition:none;animation:none}.ka-toast.ka-toast-in{transform:translate(-50%,0)}}
 @media(max-height:680px){#ks-auth-overlay[data-screen="signup"]{align-items:start;padding-top:max(10px,env(safe-area-inset-top))}#ks-auth-overlay[data-screen="signup"] #ks-auth-layout{margin-block:0 auto}}
-@media(max-width:760px){#ks-auth-overlay{padding:12px}#ks-auth-layout{grid-template-columns:1fr;min-height:0;max-width:520px;border-radius:23px}.ka-form-panel{padding:26px 22px}.ka-brand-mini{margin-bottom:24px}.ka-side{display:none}.ka-form{gap:12px 9px}}
+@media(max-width:760px){#ks-auth-overlay{padding:12px}#ks-auth-layout{grid-template-columns:1fr;min-height:0;max-width:520px;border-radius:23px}.ka-form-panel{padding:26px 22px}.ka-brand-mini{margin-bottom:24px}.ka-side{display:none}.ka-form{gap:12px 9px;grid-template-columns:1fr}.ka-form>.wide{grid-column:auto}}
 @media(max-width:390px){#ks-auth-overlay{padding:8px}.ka-form-panel{padding:22px 16px}.ka-form{grid-template-columns:1fr}.ka-form>.wide{grid-column:auto}.ka-captcha-row{grid-template-columns:.9fr 1fr 40px}.ka-form-panel h1{font-size:25px}}
 @media(max-height:550px){#ks-auth-layout{min-height:0}.ka-form-panel{padding-block:16px}.ka-brand-mini{margin-bottom:16px}}
 .ka-welcome-panel{position:relative;overflow:hidden;isolation:isolate;background:radial-gradient(ellipse at 8% 91%,rgba(129,70,241,.2),transparent 46%),radial-gradient(ellipse at 94% 5%,rgba(96,76,194,.1),transparent 37%),linear-gradient(155deg,#11111b,#0d0d15 72%)}
@@ -3064,5 +3260,141 @@ new MutationObserver(setup).observe(document.documentElement,{childList:true,sub
     .observe(document.documentElement, { childList: true, subtree: true });
 })();
 </script>
+
+<script id="ks-live-error-clear">
+/* v4: إخفاء رسالة الخطأ فور تعديل الحقل — لا يغيّر أي تصميم أو حماية */
+(function () {
+  var PROTECT = /(تم تجاوز الحد الأقصى للمحاولات|متبقي لك محاولة واحدة|حظر جهازك|حظر الجهاز)/;
+  var ERR_TXT = /(عذر|خطأ|غير صالح|غير صحيح|لا يُ?قبل|مؤقت|مطلوب|يرجى|تعذر|فشل|invalid|error|required|incorrect|not allowed|disposable)/i;
+  var ERR_CLS = /(^|[\s_-])(err|error|errors|invalid|danger|alert|bad|fail|failed|msg-err|is-invalid)([\s_-]|$)/i;
+  var hidden = [];
+  function isField(el) {
+    if (!el || !el.tagName) return false;
+    var t = el.tagName;
+    if (t === 'TEXTAREA' || t === 'SELECT') return true;
+    if (t !== 'INPUT') return false;
+    var ty = (el.type || 'text').toLowerCase();
+    return ['button','submit','reset','hidden','checkbox','radio','file','image','range','color'].indexOf(ty) < 0;
+  }
+  function errorLike(el) {
+    if (!el || el.nodeType !== 1 || el.id === 'ks-live-error-clear') return false;
+    if (el.querySelector('input,textarea,select,button,form')) return false;
+    var txt = (el.textContent || '').trim();
+    if (!txt || txt.length > 300 || PROTECT.test(txt)) return false;
+    var role = el.getAttribute('role'), live = el.getAttribute('aria-live');
+    var cls = typeof el.className === 'string' ? el.className : '';
+    if (role === 'alert' || live === 'assertive' || live === 'polite' || ERR_CLS.test(cls) || el.hasAttribute('data-error')) return true;
+    return ERR_TXT.test(txt) && el.children.length <= 3;
+  }
+  function scope(field) {
+    var f = field.form || field.closest('form');
+    if (f) return f;
+    var p = field.parentElement, n = 0;
+    while (p && p.parentElement && n < 4) { p = p.parentElement; n++; }
+    return p || document.body;
+  }
+  function hide(el) {
+    if (el.getAttribute('data-ks-err-hidden') === '1') return;
+    var cs = window.getComputedStyle(el);
+    if (cs.display === 'none' || cs.visibility === 'hidden') return;
+    if (cs.position === 'fixed') return; // لا نلمس إشعارات الحماية العائمة
+    el.setAttribute('data-ks-err-hidden', '1');
+    el.__ksPrevDisplay = el.style.display;
+    el.__ksText = el.textContent;
+    el.style.display = 'none';
+    hidden.push(el);
+  }
+  function restore(el) {
+    if (el.getAttribute('data-ks-err-hidden') !== '1') return;
+    el.style.display = el.__ksPrevDisplay || '';
+    el.removeAttribute('data-ks-err-hidden');
+  }
+  function clearFor(field) {
+    var root = scope(field);
+    var all = root.querySelectorAll('*');
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i];
+      if (!errorLike(el)) continue;
+      // نخفي أعلى عنصر خطأ فقط
+      var par = el.parentElement;
+      if (par && par !== root && errorLike(par)) continue;
+      hide(el);
+    }
+    if (field.getAttribute('aria-invalid') === 'true') field.setAttribute('aria-invalid', 'false');
+  }
+  function onEdit(e) { var t = e.target; if (isField(t) && !t.readOnly && !t.disabled) clearFor(t); }
+  document.addEventListener('input', onEdit, true);
+  document.addEventListener('change', onEdit, true);
+  // إذا عرض الموقع خطأً جديداً في نفس العنصر بعد الإرسال يعود للظهور تلقائياً
+  new MutationObserver(function () {
+    for (var i = hidden.length - 1; i >= 0; i--) {
+      var el = hidden[i];
+      if (!el.isConnected) { hidden.splice(i, 1); continue; }
+      if (el.textContent !== el.__ksText) { restore(el); hidden.splice(i, 1); }
+    }
+  }).observe(document.documentElement, { childList: true, subtree: true, characterData: true });
+  document.addEventListener('submit', function () {
+    hidden.forEach(function (el) { el.__ksText = null; });
+    setTimeout(function () { hidden.forEach(restore); hidden = []; }, 0);
+  }, true);
+})();
+</script>
+<script id="ks-i18n-server-errors">(function(){try{
+var D=[
+["تنبيه: متبقي لك محاولة واحدة أخيرة قبل حظر الجهاز مؤقتا لمدة 24 ساعة.","Warning: You have 1 last attempt remaining before your device is temporarily blocked for 24 hours."],
+["البريد الإلكتروني غير صالح أو غير موجود. يرجى التحقق منه.","The email address is invalid or does not exist. Please check it."],
+["تم تجاوز الحد الأقصى للمحاولات (5 محاولات). تم حظر جهازك مؤقتا لمدة 24 ساعة.","Maximum attempts reached (5 attempts). Your device has been temporarily blocked for 24 hours."],
+["عذرا، لا يقبل البريد المؤقت. يرجى استخدام بريد حقيقي.","Sorry, temporary/disposable email is not accepted. Please use a real email."],
+["الرمز غير صحيح أو انتهت صلاحيته.","Invalid or expired verification code."],
+["يرجى ملء جميع الحقول المطلوبة.","Please fill in all required fields."],
+["تم إرسال رمز التحقق إلى بريدك الإلكتروني.","Verification code has been sent to your email."],
+["حدث خطأ في الاتصال، يرجى المحاولة لاحقاً.","Connection error, please try again later."],
+["كلمة المرور غير متطابقة.","Passwords do not match."],
+["البريد الإلكتروني مسجل بالفعل.","Email is already registered."],
+["تم تجاوز الحد الأقصى للمحاولات (5). تم حظر جهازك لمدة 24 ساعة.","Maximum attempts reached (5 attempts). Your device has been temporarily blocked for 24 hours.",1],
+["متبقي لك محاولة واحدة قبل حظر جهازك لمدة 24 ساعة.","Warning: You have 1 last attempt remaining before your device is temporarily blocked for 24 hours.",1]];
+function esc(s){return s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");}
+var AL={"ا":"[اأإآ]","أ":"[اأإآ]","إ":"[اأإآ]","آ":"[اأإآ]","ي":"[يى]","ى":"[يى]","ه":"[هة]","ة":"[هة]"};
+var DG=["0٠","1١","2٢","3٣","4٤","5٥","6٦","7٧","8٨","9٩"];
+function arRx(s){var core=s.replace(/[.،,!؟?\s]+$/,""),o="",i,c,m;for(i=0;i<core.length;i++){c=core[i];
+if(/\s/.test(c)){while(i+1<core.length&&/\s/.test(core[i+1]))i++;o+="[\\s\\u00A0]+";continue;}
+if(/[0-9]/.test(c)){o+="["+DG[+c]+"]";continue;}
+if(c==="،"||c===","){o+="[،,]?";continue;}
+o+=(AL[c]||esc(c))+"[\\u064B-\\u065F\\u0670\\u0640]*";}
+return new RegExp(o+"[.،,!؟?]?","g");}
+function enRx(s){var core=s.replace(/[.!?]+$/,"");return new RegExp(esc(core).replace(/\s+/g,"\\s+")+"\\.?","gi");}
+var A=D.map(function(p){return {r:arRx(p[0]),v:p[1],l:p[0].length};}).sort(function(a,b){return b.l-a.l;});
+var E=D.filter(function(p){return !p[2];}).map(function(p){return {r:enRx(p[1]),v:p[0],l:p[1].length};}).sort(function(a,b){return b.l-a.l;});
+var DYN_AR=/(?:تنبيه[:：]?\s*)?متبقي\s+لك\s+([0-9٠-٩]+)\s+محاولا?ت?\s+(?:اخرى\s+|أخرى\s+)?قبل\s+حظر\s+(?:جهازك|الجهاز)\s+(?:مؤقتا?ً?\s+)?لمدة\s+([0-9٠-٩]+)\s+ساعة[.]?/g;
+var DYN_EN=/Warning:\s*You have (\d+) attempts remaining before your device is temporarily blocked for (\d+) hours\.?/gi;
+function num(d){return String(d).replace(/[٠-٩]/g,function(x){return x.charCodeAt(0)-1632;});}
+function sp(s){return s.replace(/([.!?،])(?=[^\s.!?،])/g,"$1 ");}
+function toEn(t){if(!/[\u0600-\u06FF]/.test(t))return null;var o=t;
+for(var i=0;i<A.length;i++){A[i].r.lastIndex=0;o=o.replace(A[i].r,A[i].v+" ");}
+o=o.replace(DYN_AR,function(_,a,h){return "Warning: You have "+num(a)+" attempts remaining before your device is temporarily blocked for "+num(h)+" hours. ";});
+if(o===t)return null;var lead=(t.match(/^\s*/)||[""])[0],tail=(t.match(/\s*$/)||[""])[0];
+return lead+sp(o).replace(/[ \u00A0]{2,}/g," ").trim()+tail;}
+function toAr(t){if(!/[A-Za-z]/.test(t))return null;var o=t;
+o=o.replace(DYN_EN,function(_,a,h){return "تنبيه: متبقي لك "+a+" محاولات قبل حظر الجهاز مؤقتا لمدة "+h+" ساعة. ";});
+for(var i=0;i<E.length;i++){E[i].r.lastIndex=0;o=o.replace(E[i].r,E[i].v+" ");}
+if(o===t)return null;var lead=(t.match(/^\s*/)||[""])[0],tail=(t.match(/\s*$/)||[""])[0];
+return lead+o.replace(/[ \u00A0]{2,}/g," ").trim()+tail;}
+function isEn(){try{var h=document.documentElement,b=document.body,o=document.getElementById("ks-auth-overlay"),l=(h.lang||"").toLowerCase();
+if(l)return l.indexOf("ar")!==0;
+var v="";try{v=(localStorage.getItem("ks_interface_language_v1")||"").replace(/"/g,"").toLowerCase();}catch(e){}
+if(v)return v.indexOf("ar")!==0;
+if((o&&o.getAttribute("dir")==="ltr")||h.dir==="ltr"||(b&&b.dir==="ltr"))return true;}catch(e){}return false;}
+var SEL='[role="alert"],[aria-live],.error,.ks-error,[class*="error"],[class*="Error"],[class*="alert"],[class*="invalid"],[class*="message"],[class*="msg"],[class*="toast"],[class*="warn"]';
+var busy=false;
+function each(fn){var els=document.querySelectorAll(SEL);for(var i=0;i<els.length;i++){if(els[i].closest&&els[i].closest("script,style,textarea"))continue;var w=document.createTreeWalker(els[i],4,null),t;while((t=w.nextNode()))fn(t);}}
+function run(){busy=true;try{var en=isEn();each(function(t){var v=t.nodeValue;if(!v||!v.trim())return;var x=en?toEn(v):toAr(v);if(x&&x!==v)t.nodeValue=x;});}catch(e){}busy=false;}
+var q=0;function sch(){if(busy||q)return;q=(window.requestAnimationFrame||setTimeout)(function(){q=0;run();});}
+var lastEn=null;function langChk(){var e=isEn();if(e!==lastEn){lastEn=e;run();}}
+function init(){try{if(window.__ksI18nSE)return;window.__ksI18nSE=1;lastEn=isEn();
+new MutationObserver(function(){if(busy)return;sch();}).observe(document.documentElement,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:["dir","lang","class","role"]});
+document.addEventListener("click",function(e){var t=e.target;if(t&&t.closest&&t.closest('.ks-language-option,.ks-language-trigger,[data-lang],[class*="lang"]')){sch();setTimeout(run,60);setTimeout(run,300);}},true);
+window.addEventListener("storage",langChk);setInterval(langChk,800);run();}catch(e){}}
+if(document.body)init();else document.addEventListener("DOMContentLoaded",init);
+}catch(e){}})();</script>
 </body>
 </html>
